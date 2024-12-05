@@ -7,18 +7,16 @@ from langchain_community.document_loaders import BigQueryLoader
 from langchain.schema import format_document
 from unidecode import unidecode
 from datetime import datetime, date
-import random
-import utils
+from utils import Utils
 import json
 import yaml
-import time
 import re
 
 # ************************ Config and Init Variables ************************
-with open("config/global.json", "r", encoding="utf-8") as f:
+with open("config/costco/global.json", "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
 
-with open("agent-config/examples.txt", "r", encoding="utf-8") as f:
+with open("config/costco/examples.txt", "r", encoding="utf-8") as f:
     EXAMPLES = []
     idx = 0
     for line in f:
@@ -28,20 +26,6 @@ with open("agent-config/examples.txt", "r", encoding="utf-8") as f:
             if len(EXAMPLES) <= idx:
                 EXAMPLES.append("")
             EXAMPLES[idx] += line
-
-MODELS = """\
-  * predicción de ventas: sales_model
-  * predicción de costos: costs_model\
-"""
-
-ADDITIONAL_INFO = """\
-  * Para los datos predictivos, se utilizó una estimación por medio de un modelo ARIMA (Modelo autorregresivo integrado de media móvil) entrenado con los datos históricos
-  * Para las consultas descriptivas, se genera y realiza una consulta SQL sobre la base de datos de la empresa
-  * Las preguntas de conversación pueden ser simples preguntas como "Hola", "Describe los datos que tienes", "Cómo puedo dividir las ventas por ubicación?"
-  * O también pueden ser preguntas relacionadas con respuestas anteriores, como: 
-    * "Por qué la predicción de ventas es tan baja?" (siempre y cuando la pregunta anterior haya sido una predicción de ventas)\
-    * "Compara estos resultados" (considerando las preguntas/respuestas dadas anteriormente)\
-"""
 
 PROJECT_ID = CONFIG["global"]["project_id"]
 DATASET_ID = CONFIG["global"]["dataset_id"]
@@ -62,7 +46,7 @@ SCHEMAS_DOCS = BQLOADER.load()
 
 JSON_PATTERN = r"```json(.*?)```" 
 
-with open("./agent-config/agent.yaml", "r", encoding="utf-8") as file:
+with open("config/costco/agent.yaml", "r", encoding="utf-8") as file:
     prompts = yaml.safe_load(file)["prompts"]
 
 # ************************ Functions ************************
@@ -90,17 +74,23 @@ def get_prompt(name):
     if not prompt_info:
         raise ValueError(f"Prompt '{name}' not found in the YAML file.")
     
-    template = PromptTemplate(
-        input_variables=prompt_info["variables"],
-        template=prompt_info["template"]
-    )
+    if prompt_info["type"] == "static":
+        template = prompt_info["template"]
+    else:
+        template = PromptTemplate(
+            input_variables=prompt_info["variables"],
+            template=prompt_info["template"]
+        )
     return template
 
 # ************************ Classes ************************
 class LLM():
-    def __init__(self, template_name):
+    def __init__(self, template, use_template=True):
         self.llm = VertexAI(project=PROJECT_ID, location=LOCATION_ID, credentials=CREDENTIALS, model_name=VERTEX_AI_MODEL, max_output_tokens=8192, temperature=0)
-        self.template = get_prompt(template_name)
+        if use_template:
+            self.template = get_prompt(template)
+        else:
+            self.template = template
     
     def __call__(self, **kwargs):
         prompt = self.template.format(**kwargs)
@@ -113,7 +103,10 @@ class Agent():
     history = []
     def __init__(self, history_length=3):
         self.history_length = history_length
-        
+        self.models = get_prompt("models")
+        self.additional_info = get_prompt("additional_info")
+        self.predict = Utils("costco").predict
+
         self.sql_generate = LLM("sql_generate")
         self.nl_response = LLM("nl_response")
         self.q_type = LLM("q_type")
@@ -123,10 +116,10 @@ class Agent():
         self.filter_ctx = LLM("filter_ctx")
         self.is_feasible = LLM("is_feasible")
 
-    def get_history(self):
+    def get_history(self, history, dataframe=True, query=True):
         context = []
         i,skipthis=0,False
-        for message in self.history[-2::-1]:
+        for message in history[-2::-1]:
             if i//2 >= self.history_length: break
             if skipthis:
                 skipthis=False
@@ -134,12 +127,12 @@ class Agent():
             if message["status"].startswith("success"): 
                 i+=1
                 if message['role'] == 'human': 
-                    msg = f"Pregunta: {message['content']}"
+                    msg = f'Pregunta: """{message["content"]}"""'
                     context.append(msg)
                 else:
-                    msg = f"Respuesta: {message['content']}"
-                    msg += f"\nDataframe: {message['dataframe']}" if 'dataframe' in message else ""
-                    msg += f"\nSQL Query: {message['sql_query']}" if 'sql_query' in message else ""
+                    msg = f'Respuesta: """{message["content"]}"""'
+                    msg += f'\nDataframe:\n{message["dataframe"]}' if ('dataframe' in message and dataframe) else ""
+                    msg += f'\nSQL Query: ```sql\n{message["sql_query"]}```' if ('sql_query' in message and query) else ""
                     context.append(msg + '\n')
             else: skipthis=True
         return '\n'.join(context[::-1])
@@ -153,10 +146,11 @@ class Agent():
     def get_examples(self, examples):
         return '\n'.join(examples)
 
-    def __call__(self, prompt, callback=lambda*x:x):
+    def __call__(self, prompt, history, callback=lambda*x:x):
         """returns: response, dataframe, sql_query"""
         # -------------------- Context Variables --------------------
-        history = self.get_history()
+        history = self.get_history(history)
+        history_qa = self.get_history(history, dataframe=False, query=False)
         schema = self.get_schema(SCHEMAS_DOCS)
         examples = self.get_examples(EXAMPLES)
         onlyq_examples = [ex.split("\n")[0] for ex in EXAMPLES]
@@ -167,6 +161,7 @@ class Agent():
         # 1. Determine the query type
         q_type_r = self.q_type(
             prompt=prompt,
+            history=history_qa,
             date=today,
         )
         q_type_j = extract_json(q_type_r, "q_type")
@@ -176,9 +171,12 @@ class Agent():
             case "description":
                 context = f"* **Esquema de tablas en BigQuery:**\n{schema}"
             case "prediction":
-                context = f"* **Modelos de forecast disponibles:**\n{MODELS}"
+                if self.models:
+                    context = f"* **Modelos de forecast disponibles:**\n{self.models}"
+                else:
+                    return "No hay modelos de predicción para los datos", False, None, None
             case "talk":
-                context = f"* **Información adicional de la empresa y datos:**\n{ADDITIONAL_INFO}"
+                context = f"* **Información adicional de la empresa y datos:**\n{self.additional_info}"
             case _:
                 raise ValueError(f"Query type '{q_type}' not supported.")
         
@@ -189,22 +187,19 @@ class Agent():
             history=history,
             q_type=q_type,
             date=today,
-            models=MODELS,
+            models=self.models,
         )
         is_feasible_j = extract_json(is_feasible_r, "is_feasible")
         reason_feasible = is_feasible_j['reason']
         is_feasible = is_feasible_j['feasible']
 
         if not is_feasible:
-            ...
+            return f"No puedo responder a esta pregunta con la información actual.\n{reason_feasible}", True, None, None
 
         # 3. Rephrase the question, considering the history
         new_prompt = self.rephrase_q(
             prompt=prompt,
-            context=context,
             history=history,
-            date=today,
-            reasoning=reason_feasible,
         )
 
         if q_type == "prediction":
@@ -212,18 +207,20 @@ class Agent():
             forecast_q_generate_r = self.forecast_q_generate(
                 prompt=new_prompt,
                 date=today,
-                models=MODELS,
+                models=self.models,
             )
             forecast_q_generate_j = extract_json(forecast_q_generate_r, "forecast_q_generate")
-            fc_model = forecast_q_generate_j['model']
+            if 'error' in forecast_q_generate_j:
+                return forecast_q_generate_j['error'], False, None, None
 
+            fc_model = forecast_q_generate_j['model']
             fc_up_date = forecast_q_generate_j['up_date']
             fc_up_date = datetime.strptime(fc_up_date, '%Y-%m-%d').date()
             if fc_up_date > date(2026, 12, 31): raise ValueError("Únicamente se pueden hacer predicciones hasta el 31 de diciembre de 2026.")
             fc_steps = int(((fc_up_date.year - today_date.year) * 12 + fc_up_date.month - today_date.month + (fc_up_date.day - today_date.day) / 30)//1)+1
             if fc_steps < 1: raise ValueError("La fecha de predicción debe ser mayor a la fecha actual.")
 
-            forecast = utils.predict(fc_model, fc_steps)
+            forecast = self.predict(fc_model, fc_steps)
 
             # 5.1. Analyze DF in Natural Language (prediction)
             nl_response = self.nl_response(
@@ -259,13 +256,14 @@ class Agent():
                 nl_response = re.sub(r'[$€£¥₹]', r'\\$', nl_response)
                 return nl_response, True, df, clean_query
             else:
-                return sql_error, False, None, None
+                print(sql_error)
+                return "Ocurrió un error con la consulta, por favor intenta nuevamente.", False, None, clean_query
 
         if q_type == "talk":
             # 4.2. Answer (talk)
             talk = self.talk(
                 prompt=new_prompt,
-                additional_info=ADDITIONAL_INFO,
+                additional_info=self.additional_info,
                 schema=schema,
                 date=today,
             ) # direct response
