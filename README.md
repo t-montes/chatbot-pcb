@@ -1,5 +1,11 @@
 # `Chatbot Financiero` using GenAI
 
+## Configuration
+
+Set the `global.json` file with the required attributes, following the [`template`](./config/global-template.json)
+
+Copy the JSON key file from the GCP project into the config folder, and reference it from the `global.json` "service_account_key" attribute.
+
 ## Usage
 
 The general commands before using it, are:

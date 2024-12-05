@@ -1,0 +1,7 @@
+"Dame el total de todas las facturas"
+"Dame la fecha más reciente y la más antigua"
+"Dame el valor promedio de las facturas"
+"Dame el ID de la factura con mayor valor"
+"Dame la información de la factura de ID: ..."
+"Dame la descripción de la factura [o producto] de ID: ..."
+"Dame los IDs de las facturas del día ..."

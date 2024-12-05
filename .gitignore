@@ -1,8 +1,9 @@
 __pycache__/
 venv/
 .vscode/
-config/*
-!config/*-template.json
+config/*/global.json
+config/*.json
+!-template.json
 sample/
 *.csv
 *.tsv
