@@ -214,8 +214,8 @@ prompts:
 
   models:
     template: |
-      * predicción de ventas: sales_model
-      * predicción de costos: costs_model
+      * predicción de ventas a nivel mensual: sales_model
+      * predicción de costos a nivel mensual: costs_model
     type: static
 
   additional_info:

@@ -146,11 +146,11 @@ class Agent():
     def get_examples(self, examples):
         return '\n'.join(examples)
 
-    def __call__(self, prompt, history, callback=lambda*x:x):
+    def __call__(self, prompt, full_history, callback=lambda*x:x):
         """returns: response, dataframe, sql_query"""
         # -------------------- Context Variables --------------------
-        history = self.get_history(history)
-        history_qa = self.get_history(history, dataframe=False, query=False)
+        history = self.get_history(full_history)
+        history_qa = self.get_history(full_history, dataframe=False, query=False)
         schema = self.get_schema(SCHEMAS_DOCS)
         examples = self.get_examples(EXAMPLES)
         onlyq_examples = [ex.split("\n")[0] for ex in EXAMPLES]
